@@ -51,13 +51,14 @@ class EmbeddingGenerator:
 
     def process(self, file_path: str) -> list[torch.tensor]:
         return self.processor(file_path)
+
     def get_embeddings_tokenized(self, input_tokens):
         tokens_mask = input_tokens > 0
         tokens_encoded, tokens_mask = self.midi_encoder(
-                encoder_input_tokens=input_tokens, encoder_inputs_mask=tokens_mask
-            )
+            encoder_input_tokens=input_tokens, encoder_inputs_mask=tokens_mask
+        )
         return tokens_encoded, tokens_mask
-        
+
     def get_embeddings(self, file_path: str) -> list[torch.tensor]:
         out = self.process(file_path)
         embeddings = []
@@ -126,17 +127,19 @@ def main():
             # if len(midi_tokens)==100:
             #     break
         keys = list(midi_tokens.keys())
-        all_tokens = torch.cat([torch.IntTensor(midi_tokens[key][0]).view(1, -1) for key in keys])
+        all_tokens = torch.cat(
+            [torch.IntTensor(midi_tokens[key][0]).view(1, -1) for key in keys]
+        )
         print(all_tokens.shape)
         BSZ = 8
-        for i in range(0,all_tokens.shape[0],BSZ):
-            batch = all_tokens[i:i+BSZ].cuda(device=generator.device)
+        for i in range(0, all_tokens.shape[0], BSZ):
+            batch = all_tokens[i : i + BSZ].cuda(device=generator.device)
             with torch.autocast("cuda"):
                 tokens, tokens_mask = generator.get_embeddings_tokenized(batch)
             for idx in range(batch.shape[0]):
-                out_file_path, file = keys[i+idx]
+                out_file_path, file = keys[i + idx]
                 avg_embedding = tokens[idx][tokens_mask[idx]].mean(0)
-                
+
                 print(f"generating embedding for '{file}'")
                 print(
                     f"\tshape: {avg_embedding.shape}, min: {avg_embedding.min()}, max: {avg_embedding.max()}, mean: {avg_embedding.mean()}"
@@ -147,7 +150,9 @@ def main():
                     print(f"\tRuntimeError while writing file, retrying...")
                     time.sleep(1)
                     midi_embeddings = generator.get_embeddings(file)
-                    avg_embedding = midi_embeddings[0] #np.mean(midi_embeddings, axis=0)
+                    avg_embedding = midi_embeddings[
+                        0
+                    ]  # np.mean(midi_embeddings, axis=0)
                     print(
                         f"\tshape: {avg_embedding.shape}, min: {avg_embedding.min()}, max: {avg_embedding.max()}, mean: {avg_embedding.mean()}"
                     )
