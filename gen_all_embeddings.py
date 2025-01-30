@@ -1,12 +1,14 @@
 import os
 import time
+import h5py
+import torch
+import pandas as pd
 from rich import print
 from rich.progress import Progress
-import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from diffusers.pipelines.deprecated.spectrogram_diffusion.notes_encoder import (
     SpectrogramNotesEncoder,
 )
-import torch
 from diffusers import MidiProcessor
 
 torch.set_grad_enabled(False)
@@ -29,9 +31,15 @@ class EmbeddingGenerator:
     def __init__(
         self,
         encoder_weights: str,
+        out_path: str,
         device: str = None,
         config: dict = None,
     ):
+        # init outfile
+        self.output_file_path = out_path
+        # self.data_file = h5py.
+
+        # build processor
         self.processor = MidiProcessor()
         if device:
             self.device = device
@@ -70,112 +78,97 @@ class EmbeddingGenerator:
             tokens_encoded, tokens_mask = self.midi_encoder(
                 encoder_input_tokens=input_tokens, encoder_inputs_mask=tokens_mask
             )
-            # use token mask
-            # print(tokens_mask.shape)
-            # print(tokens_mask.sum(),tokens_encoded[tokens_mask].shape)
-            # raise Exception("testing")
             embeddings.append(tokens_encoded[tokens_mask].mean(dim=0).cpu().detach())
-            break
+            break  # NOTE: we're only using the first 5.12 seconds!
 
         return embeddings
 
-    def write_embedding(self, embedding: torch.Tensor, embedding_path: str) -> bool:
-        print(f"\tsaving to '{embedding_path}'")
-        try:
-            torch.save(embedding, embedding_path)
-        except RuntimeError:
-            pass
+    def save_embeddings(self, results):
+        t_file_start = time.perf_counter()
+        with pd.HDFStore(self.output_file) as store:
+            store.append("embeddings", results)
+        t_file_end = time.perf_counter()
+        print(f"file write took {t_file_end - t_file_start:.05f} seconds")
 
-        return os.path.isfile(embedding_path)
+    def run(self, file_list: list[str], batch_size: int = 32):
+        for i in range(0, len(file_list), batch_size):
+            # tokenization time start
+            t_tok_start = time.perf_counter()
+
+            # generate tokens
+            midi_tokens = dict()
+            for idx in range(batch_size):
+                if i + idx > len(file_list):
+                    print(f"skipping index {i + idx} > {len(file_list)}")
+                    continue
+                midi_tokens[
+                    os.path.splitext(os.path.basename(file_list[i + idx]))[0]
+                ] = self.process(file_list[i + idx])
+
+            batch_keys = [
+                os.path.splitext(os.path.basename(k))[0] for k in midi_tokens.keys()
+            ]
+            # print(f"keys:\n{batch_keys}")
+            batch_tokens = torch.cat(
+                [torch.IntTensor(midi_tokens[key][0]).view(1, -1) for key in batch_keys]
+            ).cuda(device=self.device)
+
+            # tokenization time end & embedding time start
+            t_tok_end = time.perf_counter()
+            print(f"tokenization took {t_tok_end - t_tok_start:.05f} seconds")
+
+            # generate embeddings
+            series = pd.DataFrame(
+                index=batch_keys, columns=range(self.encoder_config["d_model"])
+            )
+            with torch.autocast("cuda"):
+                tokens, tokens_mask = self.get_embeddings_tokenized(batch_tokens)
+            for idx in range(batch_tokens.shape[0]):
+                ae = tokens[idx][tokens_mask[idx]].mean(0).cpu().detach()
+                print(f"saving to {batch_keys[idx]}:\n{ae}")
+                series.loc[batch_keys[idx]] = (
+                    tokens[idx][tokens_mask[idx]].mean(0).cpu().detach()
+                )
+            self.save_embeddings(series)
+
+            # embedding time end
+            t_emb_end = time.perf_counter()
+            print(f"embedding took {t_emb_end - t_tok_end:.05f} seconds")
 
 
 def main():
     supported_extensions = (".mid", ".midi")
     encoder = "data/note_encoder.bin"
     device = "cuda:1"
+    dataset_name = "20250110-segmented"
     in_path = "/media/nova/Datasets/sageev-midi/20250110/segmented"
-    out_path = "data/embeddings"
-    log_path = "data/log.txt"
-
-    os.makedirs(out_path, exist_ok=True)
+    out_path = f"data/{dataset_name}.h5"
+    batch_size = 4
 
     print(f"initializing embedding generator")
-    generator = EmbeddingGenerator(encoder, device)
+    generator = EmbeddingGenerator(encoder, out_path, device=device)
     print(f"initialization complete")
 
     n_files = 0
+    all_files = []
     for path, _, files in os.walk(in_path):
-        n_files += len([f for f in files if f.endswith(supported_extensions)])
+        valid_files = [
+            os.path.join(path, f) for f in files if f.endswith(supported_extensions)
+        ]
+        n_files += len(valid_files)
+        all_files.extend(valid_files)
+    all_files.sort()
+    print(f"processing {n_files} files, e.g.:\n{all_files[:5]}")
 
-    p = Progress()
-    task1 = p.add_task(f"generating tokens", total=n_files)
-    task2 = p.add_task(f"generating embeddings", total=n_files)
-    successful_writes = 0
-    with p:
-        midi_tokens = dict()
-        for path, _, files in os.walk(in_path):
-            for file in [
-                os.path.join(path, f) for f in files if f.endswith(supported_extensions)
-            ]:
-                out_file_path = os.path.join(
-                    out_path, os.path.splitext(os.path.basename(file))[0] + ".pt"
-                )
-                midi_tokens[out_file_path, file] = generator.process(file)
-                p.advance(task1)
-            #     if len(midi_tokens)==100:
-            #         break
-            # if len(midi_tokens)==100:
-            #     break
-        keys = list(midi_tokens.keys())
-        all_tokens = torch.cat(
-            [torch.IntTensor(midi_tokens[key][0]).view(1, -1) for key in keys]
-        )
-        print(all_tokens.shape)
-        BSZ = 8
-        for i in range(0, all_tokens.shape[0], BSZ):
-            batch = all_tokens[i : i + BSZ].cuda(device=generator.device)
-            with torch.autocast("cuda"):
-                tokens, tokens_mask = generator.get_embeddings_tokenized(batch)
-            for idx in range(batch.shape[0]):
-                out_file_path, file = keys[i + idx]
-                avg_embedding = tokens[idx][tokens_mask[idx]].mean(0)
+    generator.run(all_files, batch_size=batch_size)
 
-                print(f"generating embedding for '{file}'")
-                print(
-                    f"\tshape: {avg_embedding.shape}, min: {avg_embedding.min()}, max: {avg_embedding.max()}, mean: {avg_embedding.mean()}"
-                )
-
-                # save average embedding tensor to file, retrying once in case of corruption error
-                if not generator.write_embedding(avg_embedding, out_file_path):
-                    print(f"\tRuntimeError while writing file, retrying...")
-                    time.sleep(1)
-                    midi_embeddings = generator.get_embeddings(file)
-                    avg_embedding = midi_embeddings[
-                        0
-                    ]  # np.mean(midi_embeddings, axis=0)
-                    print(
-                        f"\tshape: {avg_embedding.shape}, min: {avg_embedding.min()}, max: {avg_embedding.max()}, mean: {avg_embedding.mean()}"
-                    )
-                    if not generator.write_embedding(avg_embedding, out_file_path):
-                        print(
-                            f"\tSecond RuntimeError while writing file, logging and skipping..."
-                        )
-                        with open(log_path, "a") as f:
-                            f.write(f"ERROR, {file}, {out_file_path},\n")
-
-                if os.path.isfile(out_file_path):
-                    successful_writes += 1
-                    print(
-                        f"\t{os.path.getsize(out_file_path)} bytes written to {out_file_path}"
-                    )
-
-                p.advance(task2)
+    if os.path.exists(out_path):
+        print(f"saved embeddings to {out_path}")
+    else:
+        print(f"error saving embeddings!")
 
     print(f"embedding generation complete")
-    print(
-        f"{successful_writes} / {n_files} files written, see '{log_path}' for details"
-    )
-    print(f"DONE")
+    print(f"wrote {os.path.getsize(out_path)} bytes")
 
 
 if __name__ == "__main__":
