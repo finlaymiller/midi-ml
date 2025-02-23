@@ -3,7 +3,6 @@ import h5py
 import argparse
 from rich import print
 from rich.progress import Progress, MofNCompleteColumn, SpinnerColumn, TimeElapsedColumn
-import h5py
 import torch
 from diffusers.pipelines.deprecated.spectrogram_diffusion.notes_encoder import (
     SpectrogramNotesEncoder,
@@ -66,13 +65,13 @@ def embed(config):
                         batch_tokens = torch.cat(
                             [torch.IntTensor(tokens[i : i + BATCH_SIZE])]
                         ).cuda(device=config.device)
-                        # print(f"loaded tokens {batch_tokens.shape}")
                         tokens_mask = batch_tokens > 0
                         tokens_encoded, tokens_mask = midi_encoder(
                             encoder_input_tokens=batch_tokens,
                             encoder_inputs_mask=tokens_mask,
                         )
                     # print(f"generated embeddings {tokens_encoded.shape}")
+                    # print(tokens_encoded[0][tokens_mask[0]].mean(0).cpu().shape)
                     # TODO: normalize each embedding before storing it
                     d_embeddings[i : i + BATCH_SIZE] = [
                         enc[mask].mean(0).cpu().detach()
@@ -97,7 +96,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser("Spectrogram Diffusion Embeddings", add_help=False)
     parser.add_argument("--in_file", "-i", type=str)
     parser.add_argument("--out_file", "-o", type=str)
-    parser.add_argument("--device", "-d", type=str, default="cuda:1")
+    parser.add_argument("--device", "-d", type=str, default="cuda:0")
     config = parser.parse_args()
 
     embed(config)

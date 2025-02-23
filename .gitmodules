@@ -1,0 +1,3 @@
+[submodule "polyffusion"]
+	path = polyffusion
+	url = https://github.com/aik2mlj/polyffusion

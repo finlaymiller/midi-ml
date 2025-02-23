@@ -3,6 +3,9 @@
 *.pt
 *.h5
 *.parquet
+data/*
+whisper/data
+whisper/model
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
